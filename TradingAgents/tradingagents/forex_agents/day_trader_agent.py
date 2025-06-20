@@ -5,6 +5,8 @@ import datetime
 import traceback # For printing tracebacks
 import pandas as pd
 import pandas_ta as ta
+import uuid # For generating task_id
+import re # For extracting currency_pair from prompt
 
 class DayTraderAgent:
     def __init__(self,
@@ -45,6 +47,13 @@ class DayTraderAgent:
         print(f"{self.agent_id} initialized with broker. Timeframe: {self.timeframe}, Bars: {self.num_bars_to_fetch}, Strategy Params: EMA({self.ema_short_period}/{self.ema_long_period}), RSI({self.rsi_period}), MACD({self.macd_fast}/{self.macd_slow}/{self.macd_signal})")
         print(f"Broker type: {type(self.broker)}")
 
+    def _extract_currency_pair_from_prompt(self, prompt: str) -> str:
+        # Simple regex to find a potential currency pair like EURUSD, GBP/JPY, XAU_USD
+        match = re.search(r'([A-Z]{3}[/_]?[A-Z]{3})', prompt.upper())
+        if match:
+            return match.group(1).replace('/', '').replace('_', '')
+        return "EURUSD" # Default if not found
+
     # Helper method for SL/TP calculation based on pair characteristics
     def _calculate_pip_value_and_precision(self, currency_pair: str) -> tuple[float, int]:
         pair_normalized = currency_pair.upper()
@@ -67,37 +76,29 @@ class DayTraderAgent:
         print(f"Warning: Unknown timeframe '{timeframe_str}', defaulting to 1 hour for duration calculation.")
         return 60 * 60 # Default to 1 hour if unknown
 
-    def process_task(self, state: Dict) -> Dict:
-        task: Optional[ForexSubAgentTask] = state.get("current_day_trader_task")
+    def process_task(self, prompt: str, current_simulated_time_iso: str) -> ForexTradeProposal: # Return ForexTradeProposal
+        # Construct task from prompt
+        currency_pair = self._extract_currency_pair_from_prompt(prompt)
+        task_id = f"daytrade_task_{uuid.uuid4().hex[:8]}"
+
         # Initialize supporting_data for the proposal early
-        supporting_data_for_proposal = {"params_used": {"timeframe": self.timeframe, "num_bars": self.num_bars_to_fetch, "ema_s": self.ema_short_period, "ema_l": self.ema_long_period, "rsi_p": self.rsi_period}}
+        supporting_data_for_proposal = {
+            "prompt_received": prompt,
+            "params_used": {"timeframe": self.timeframe, "num_bars": self.num_bars_to_fetch, "ema_s": self.ema_short_period, "ema_l": self.ema_long_period, "rsi_p": self.rsi_period}
+        }
 
-        if not task:
-            print(f"{self.agent_id}: No current_day_trader_task found in state.")
-            current_time_iso_prop = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            error_proposal = ForexTradeProposal(
-                proposal_id=f"prop_day_err_{current_time_iso_prop.replace(':', '-')}",
-                source_agent_type="DayTrader", currency_pair="Unknown", timestamp=current_time_iso_prop,
-                signal="HOLD", entry_price=None, stop_loss=None, take_profit=None, confidence_score=0.0,
-                rationale=f"{self.agent_id}: Task not found in state.", sub_agent_risk_level="Unknown",
-                supporting_data=supporting_data_for_proposal # Include params even in error
-            )
-            return {"day_trader_proposal": error_proposal, "error": f"{self.agent_id}: Task not found."}
+        # Removed 'if not task:' block as task is constructed.
+        # currency_pair, task_id are defined above.
+        # current_simulated_time_iso is a direct argument.
 
-        currency_pair = task['currency_pair']
-        task_id = task['task_id']
-
-        current_simulated_time_iso = state.get("current_simulated_time")
-        data_message = "No data fetching attempt due to missing simulated time."
+        data_message = "No data fetching attempt due to missing simulated time." # Default
         historical_data = None # Initialize
 
-        if not current_simulated_time_iso:
-            print(f"{self.agent_id}: current_simulated_time not found in state for task {task_id}.")
-        else:
-            print(f"{self.agent_id}: Processing task '{task_id}' for {currency_pair} at simulated time {current_simulated_time_iso}.")
-            print(f"{self.agent_id}: Using broker: {self.broker}, Timeframe: {self.timeframe}, Bars to fetch: {self.num_bars_to_fetch}")
+        # current_simulated_time_iso is now a direct argument
+        print(f"{self.agent_id}: Processing task '{task_id}' for {currency_pair} (from prompt: '{prompt}') at time {current_simulated_time_iso}.")
+        print(f"{self.agent_id}: Using broker: {self.broker}, Timeframe: {self.timeframe}, Bars to fetch: {self.num_bars_to_fetch}")
 
-            try:
+        try:
                 decision_time_dt = datetime.datetime.fromisoformat(current_simulated_time_iso.replace('Z', '+00:00'))
                 decision_time_unix = decision_time_dt.timestamp()
                 timeframe_duration_seconds = self._get_timeframe_seconds_approx(self.timeframe)
@@ -325,4 +326,4 @@ class DayTraderAgent:
             supporting_data=supporting_data_for_proposal
         )
 
-        return {"day_trader_proposal": trade_proposal}
+        return trade_proposal # Return the full proposal object

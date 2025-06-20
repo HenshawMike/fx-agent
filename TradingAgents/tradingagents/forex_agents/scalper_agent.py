@@ -5,6 +5,8 @@ import datetime
 import pandas as pd # Will be needed soon
 import pandas_ta as ta # Will be needed soon
 import traceback # For potential error logging in future steps
+import uuid # For generating task_id
+import re # For extracting currency_pair from prompt
 
 class ScalperAgent:
     def __init__(self,
@@ -48,6 +50,13 @@ class ScalperAgent:
 
         print(f"{self.agent_id} initialized. Broker: {type(self.broker)}, TF: {self.timeframe}, Bars: {self.num_bars_to_fetch}, EMAs: ({self.ema_short_period}/{self.ema_long_period}), SL: {self.stop_loss_pips}, TP: {self.take_profit_pips}, MaxSpread: {self.max_allowable_spread_pips}")
 
+    def _extract_currency_pair_from_prompt(self, prompt: str) -> str:
+        # Simple regex to find a potential currency pair like EURUSD, GBP/JPY, XAU_USD
+        match = re.search(r'([A-Z]{3}[/_]?[A-Z]{3})', prompt.upper())
+        if match:
+            return match.group(1).replace('/', '').replace('_', '')
+        return "EURUSD" # Default if not found
+
     def _get_timeframe_seconds_approx(self, timeframe_str: str) -> int:
         # (Identical to other agents, consider moving to a shared utility later)
         timeframe_str = timeframe_str.upper()
@@ -71,10 +80,16 @@ class ScalperAgent:
         else:
             return 0.0001, 5
 
-    def process_task(self, state: Dict) -> Dict:
-        task: Optional[ForexSubAgentTask] = state.get("current_scalper_task") # Expected key for this agent
+    def process_task(self, prompt: str, current_simulated_time_iso: str) -> ForexTradeProposal: # Return ForexTradeProposal
+        # Construct task from prompt
+        currency_pair = self._extract_currency_pair_from_prompt(prompt)
+        task_id = f"scalp_task_{uuid.uuid4().hex[:8]}"
+
+        # This replaces the old task fetching from state
+        # task: Optional[ForexSubAgentTask] = state.get("current_scalper_task")
 
         supporting_data_for_proposal = {
+            "prompt_received": prompt, # Store the original prompt
             "params_used": {
                 "timeframe": self.timeframe, "num_bars": self.num_bars_to_fetch,
                 "ema_s": self.ema_short_period, "ema_l": self.ema_long_period,
@@ -85,33 +100,22 @@ class ScalperAgent:
             }
         }
 
-        if not task:
-            print(f"{self.agent_id}: No current_scalper_task found in state.")
-            current_time_iso_prop = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            error_proposal = ForexTradeProposal(
-                proposal_id=f"prop_scalp_err_{current_time_iso_prop.replace(':', '-')}",
-                source_agent_type="ScalperAgent", currency_pair="Unknown", timestamp=current_time_iso_prop,
-                signal="HOLD", entry_price=None, stop_loss=None, take_profit=None, confidence_score=0.0,
-                rationale=f"{self.agent_id}: Task not found in state.", sub_agent_risk_level="Unknown",
-                supporting_data=supporting_data_for_proposal
-            )
-            return {"scalper_proposal": error_proposal, "error": f"{self.agent_id}: Task not found."}
+        # The 'if not task:' block is removed as task is now constructed from prompt.
+        # currency_pair and task_id are already defined above.
+        # current_simulated_time_iso is now a direct argument.
 
-        currency_pair = task['currency_pair']
-        task_id = task['task_id']
-
-        current_simulated_time_iso = state.get("current_simulated_time")
-        data_message = "No data fetching attempt due to missing simulated time."
-        spread_check_message = "Spread check not performed."
+        data_message = "No data fetching attempt due to missing simulated time." # Default message
+        spread_check_message = "Spread check not performed." # Default message
         historical_data = None
 
-        if not current_simulated_time_iso:
-            print(f"{self.agent_id}: current_simulated_time not found in state for task {task_id}.")
-        else:
-            print(f"{self.agent_id}: Processing task '{task_id}' for {currency_pair} at simulated time {current_simulated_time_iso}.")
-            print(f"{self.agent_id}: Config - TF:{self.timeframe}, Bars:{self.num_bars_to_fetch}, MaxSpread:{self.max_allowable_spread_pips} pips")
+        # current_simulated_time_iso is now a direct argument, so we don't need to check if it's missing from state.
+        # However, it's good practice to ensure it's a valid string if it were coming from an unreliable source.
+        # For now, we assume it's provided correctly by the FastAPI backend.
 
-            # 1. Spread Check (Crucial for Scalpers)
+        print(f"{self.agent_id}: Processing task '{task_id}' for {currency_pair} (from prompt: '{prompt}') at time {current_simulated_time_iso}.")
+        print(f"{self.agent_id}: Config - TF:{self.timeframe}, Bars:{self.num_bars_to_fetch}, MaxSpread:{self.max_allowable_spread_pips} pips")
+
+        # 1. Spread Check (Crucial for Scalpers)
             try:
                 current_tick = self.broker.get_current_price(currency_pair) # Expected PriceTick TypedDict
                 if current_tick and current_tick.get('ask') is not None and current_tick.get('bid') is not None:
@@ -383,4 +387,4 @@ class ScalperAgent:
 
     print(f"{self.agent_id}: Generated proposal for {currency_pair} after strategy evaluation.") # Consistent print message
 
-    return {"scalper_proposal": trade_proposal}
+    return trade_proposal # Return the full proposal object
