@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import datetime
 import random # For dummy broker data
+import os # <--- ADDED IMPORT OS
 from typing import Optional, List, Dict, Any, TypedDict, Literal # Import Literal
 
 # Attempt to import broker interface and agent classes
@@ -41,9 +42,71 @@ except ImportError as e:
         agent_id: str = "dummy_positiontrader"
         def process_task(self, prompt: str, current_simulated_time_iso: str) -> ForexTradeProposal: pass
 
+# Import MT5Broker
+try:
+    from TradingAgents.tradingagents.broker_interface.mt5_broker import MT5Broker, MT5_AVAILABLE
+except ImportError as e:
+    print(f"Error importing MT5Broker: {e}")
+    MT5Broker = None # type: ignore
+    MT5_AVAILABLE = False
+
 app = FastAPI()
 
-# --- Dummy Broker Implementation ---
+# --- MT5 Credentials Model ---
+class MT5Credentials(BaseModel):
+    login: int
+    password: str
+    server: str
+    path: Optional[str] = None
+
+class MT5CredentialsResponse(BaseModel):
+    login: Optional[int] = None
+    server: Optional[str] = None
+    path: Optional[str] = None
+    connected: bool
+    message: str
+    mt5_library_available: bool
+
+# --- Global MT5 Broker Instance ---
+# Initialize with no credentials; they will be set via API
+# Agents will use this shared instance.
+# We use a placeholder agent_id for now, can be configured if needed per agent later.
+if MT5Broker:
+    # Attempt to initialize with environment variables as a fallback/default
+    # This aligns with existing practices in MT5_TEST_GUIDE.md
+    env_mt5_login_str = os.getenv("MT5_LOGIN")
+    env_mt5_password = os.getenv("MT5_PASSWORD")
+    env_mt5_server = os.getenv("MT5_SERVER")
+    env_mt5_path = os.getenv("MT5_PATH")
+
+    initial_creds_available = False
+    if env_mt5_login_str and env_mt5_password and env_mt5_server:
+        try:
+            initial_login = int(env_mt5_login_str)
+            initial_credentials = {
+                "login": initial_login,
+                "password": env_mt5_password,
+                "server": env_mt5_server,
+                "path": env_mt5_path
+            }
+            shared_mt5_broker = MT5Broker(agent_id="FastAPIGlobalAgent")
+            print("Attempting to connect shared MT5 broker with environment variables...")
+            if shared_mt5_broker.connect(initial_credentials):
+                print("Shared MT5 broker connected successfully using environment variables.")
+            else:
+                print("Failed to connect shared MT5 broker using environment variables. It will remain disconnected until new credentials are provided via API.")
+            initial_creds_available = True
+        except ValueError:
+            print("MT5_LOGIN environment variable is not a valid integer. Shared MT5 broker will be initialized without initial connection attempt.")
+            shared_mt5_broker = MT5Broker(agent_id="FastAPIGlobalAgent")
+    else:
+        print("MT5 environment variables (MT5_LOGIN, MT5_PASSWORD, MT5_SERVER) not fully set. Shared MT5 broker will be initialized without initial connection attempt.")
+        shared_mt5_broker = MT5Broker(agent_id="FastAPIGlobalAgent")
+else:
+    shared_mt5_broker = None # type: ignore
+    print("MT5Broker class not available. MT5 functionality will be disabled.")
+
+# --- Dummy Broker Implementation (fallback if MT5Broker is not used or fails) ---
 class DummyBroker(BrokerInterface):
     def get_current_price(self, symbol: str) -> Optional[PriceTick]:
         print(f"DummyBroker: get_current_price called for {symbol}")
@@ -97,17 +160,107 @@ class DummyBroker(BrokerInterface):
     def close_trade(self, ticket_id: int, **kwargs) -> bool: return True
     def delete_pending_order(self, ticket_id: int) -> bool: return True
 
+# --- API Endpoints for MT5 Settings ---
+@app.post("/settings/mt5_credentials", response_model=MT5CredentialsResponse)
+async def set_mt5_credentials(credentials: MT5Credentials):
+    if not shared_mt5_broker:
+        return MT5CredentialsResponse(
+            connected=False,
+            message="MT5Broker is not available in the backend.",
+            mt5_library_available=MT5_AVAILABLE
+        )
+
+    # Disconnect if already connected with potentially different credentials
+    if shared_mt5_broker._connected:
+        shared_mt5_broker.disconnect()
+
+    creds_dict = {
+        "login": credentials.login,
+        "password": credentials.password,
+        "server": credentials.server,
+        "path": credentials.path
+    }
+
+    print(f"Attempting to connect MT5 with new credentials for login: {credentials.login}")
+    connection_success = shared_mt5_broker.connect(creds_dict)
+
+    if connection_success:
+        return MT5CredentialsResponse(
+            login=shared_mt5_broker.credentials.get('login'),
+            server=shared_mt5_broker.credentials.get('server'),
+            path=shared_mt5_broker.credentials.get('path'),
+            connected=True,
+            message="MT5 connected successfully.",
+            mt5_library_available=MT5_AVAILABLE
+        )
+    else:
+        last_error = ""
+        if MT5_AVAILABLE and hasattr(shared_mt5_broker.mt5, 'last_error'): # Access mt5 attribute of broker instance
+            error_code, error_message = shared_mt5_broker.mt5.last_error()
+            last_error = f" Error: {error_message} (Code: {error_code})"
+
+        return MT5CredentialsResponse(
+            login=credentials.login, # Return submitted login
+            server=credentials.server, # Return submitted server
+            path=credentials.path, # Return submitted path
+            connected=False,
+            message=f"Failed to connect to MT5.{last_error}",
+            mt5_library_available=MT5_AVAILABLE
+        )
+
+@app.get("/settings/mt5_credentials", response_model=MT5CredentialsResponse)
+async def get_mt5_settings():
+    if not shared_mt5_broker:
+        return MT5CredentialsResponse(
+            connected=False,
+            message="MT5Broker is not available in the backend.",
+            mt5_library_available=MT5_AVAILABLE
+        )
+
+    is_connected = shared_mt5_broker._connected
+    current_creds = shared_mt5_broker.credentials
+
+    return MT5CredentialsResponse(
+        login=current_creds.get('login') if current_creds else None,
+        server=current_creds.get('server') if current_creds else None,
+        path=current_creds.get('path') if current_creds else None,
+        connected=is_connected,
+        message="MT5 connection status retrieved." if is_connected else "MT5 is not currently connected.",
+        mt5_library_available=MT5_AVAILABLE
+    )
+
 # --- Agent Instantiation ---
+# Determine which broker to use
+active_broker_instance: Optional[BrokerInterface] = None
+if shared_mt5_broker and shared_mt5_broker.mt5_available: # Prioritize MT5 if available
+    print("Using shared_mt5_broker for agents.")
+    active_broker_instance = shared_mt5_broker
+else:
+    print("MT5Broker not available or MT5 library not found. Falling back to DummyBroker for agents.")
+    active_broker_instance = DummyBroker()
+
+
 try:
-    dummy_broker_instance = DummyBroker()
-    scalper_agent = ScalperAgent(broker=dummy_broker_instance, publisher=None)
-    day_trader_agent = DayTraderAgent(broker=dummy_broker_instance, publisher=None)
-    swing_trader_agent = SwingTraderAgent(broker=dummy_broker_instance, publisher=None)
-    position_trader_agent = PositionTraderAgent(broker=dummy_broker_instance, publisher=None)
-    print("Trading agents instantiated successfully with DummyBroker.")
+    # Ensure active_broker_instance is not None before passing to agents
+    if active_broker_instance is None:
+        print("CRITICAL ERROR: No broker instance available (neither MT5 nor Dummy). Agents cannot be initialized.")
+        # Depending on desired behavior, could raise an error or try to default to DummyBroker again
+        # For now, let agents be uninitialized or error out if this happens.
+        scalper_agent = None # type: ignore
+        day_trader_agent = None # type: ignore
+        swing_trader_agent = None # type: ignore
+        position_trader_agent = None # type: ignore
+    else:
+        scalper_agent = ScalperAgent(broker=active_broker_instance, publisher=None) # type: ignore
+        day_trader_agent = DayTraderAgent(broker=active_broker_instance, publisher=None) # type: ignore
+        swing_trader_agent = SwingTraderAgent(broker=active_broker_instance, publisher=None) # type: ignore
+        position_trader_agent = PositionTraderAgent(broker=active_broker_instance, publisher=None) # type: ignore
+        print(f"Trading agents instantiated successfully with {'MT5Broker' if isinstance(active_broker_instance, MT5Broker) else 'DummyBroker'}.")
+
 except Exception as e:
     print(f"Failed to instantiate agents: {e}")
-    scalper_agent = ScalperAgent(); day_trader_agent = DayTraderAgent(); swing_trader_agent = SwingTraderAgent(); position_trader_agent = PositionTraderAgent()
+    scalper_agent = ScalperAgent(); day_trader_agent = DayTraderAgent(); swing_trader_agent = SwingTraderAgent(); position_trader_agent = PositionTraderAgent() # Fallback to default init
+
 
 # --- API Models ---
 class ChatPrompt(BaseModel):
