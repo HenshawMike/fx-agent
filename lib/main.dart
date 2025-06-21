@@ -5,6 +5,7 @@ import 'ui/pages/dashboard_page.dart';
 import 'ui/pages/agent_control_page.dart';
 import 'ui/pages/logs_page.dart';
 import 'ui/pages/settings_page.dart';
+import 'ui/pages/chat_page.dart'; // Import the new ChatPage
 
 void main() {
   runApp(const StroudAIApp());
@@ -19,13 +20,14 @@ class StroudAIApp extends StatelessWidget {
       title: 'Stroud AI',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
-      initialRoute: '/',
+      initialRoute: '/chat', // Temporarily set to /chat for testing
       routes: {
         '/': (context) => const LoginPage(),
         '/dashboard': (context) => const DashboardPage(),
         '/agent': (context) => const AgentControlPage(),
         '/logs': (context) => const LogsPage(),
         '/settings': (context) => const SettingsPage(),
+        '/chat': (context) => const ChatPage(), // Add ChatPage route
       },
     );
   }
